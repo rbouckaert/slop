@@ -79,8 +79,10 @@ def process():
     
     # Pass 0 as the starting distance for the root
     tree2 = tree_to_dict(tree.root, tip_data, 0)
-    print(tree2)
-    return jsonify(tree_to_dict(tree.root, tip_data, 0))
+    #print(tree2)
+    return jsonify(tree2)
+    
+    #return jsonify(tree_to_dict(tree.root, tip_data, 0))
 
 if __name__ == '__main__':
     app.run(debug=True)

@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protein Logo Visualizer & Export</title>
+    <style>
+        body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f2f5; color: #333; line-height: 1.5; }
+        .container { max-width: 5000px; margin: auto; }
+        header { text-align: center; margin-bottom: 30px; }
+        
+        .tool-section { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 40px; border: 1px solid #e1e4e8; }
+        h2 { margin-top: 0; color: #1a202c; border-bottom: 2px solid #edf2f7; padding-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+        .badge { font-size: 0.5em; background: #ebf8ff; color: #2b6cb0; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; margin-left: 10px; }
+        
+        .controls { display: flex; align-items: center; gap: 15px; margin: 15px 0; padding: 15px; background: #fafafa; border-radius: 8px; border: 1px solid #eee; }
+        
+        .btn-export { 
+            background-color: #4a5568; color: white; border: none; padding: 8px 16px; 
+            border-radius: 6px; cursor: pointer; font-weight: 600; display: none; 
+        }
+        .btn-export:hover { background-color: #2d3748; }
+
+        .canvas-wrapper { overflow-x: auto; margin-top: 20px; background: #fff; border: 1px solid #eee; border-radius: 4px; }
+        canvas { display: block; margin: 0 auto; }
+        
+        .instructions { font-size: 0.9em; color: #666; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Amino Acid Frequency Visualizer</h1>
+        <p>Analyze and export sequence logos as high-quality SVG files.</p>
+    </header>
+
+    <!-- TSV SECTION -->
+    <section class="tool-section">
+        <h2>
+            <div>TSV Integer Format <span class="badge">Col 1 Ignored</span></div>
+            <button id="exportTsv" class="btn-export">Export SVG</button>
+        </h2>
+        <p class="instructions">Upload tab-delimited file (integers 0-19).</p>
+        <div class="controls">
+            <input type="file" id="tsvInput" accept=".tsv,.log">
+        </div>
+        <div class="canvas-wrapper">
+            <canvas id="tsvCanvas"></canvas>
+        </div>
+    </section>
+
+    <!-- FASTA SECTION -->
+    <section class="tool-section">
+        <h2>
+            <div>FASTA Format <span class="badge">Standard Sequences</span></div>
+            <button id="exportFasta" class="btn-export">Export SVG</button>
+        </h2>
+        <p class="instructions">Upload .fasta file (A-Z characters).</p>
+        <div class="controls">
+            <input type="file" id="fastaInput" accept=".fasta,.fa,.txt">
+        </div>
+        <div class="canvas-wrapper">
+            <canvas id="fastaCanvas"></canvas>
+        </div>
+    </section>
+</div>
+
+<script>
+    const AMINO_ACIDS_LIST = ["A", "C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y"];
+    const COLOR_MAP = {
+        'A': '#E6E600', 'V': '#E6E600', 'L': '#E6E600', 'I': '#E6E600', 'M': '#E6E600', 
+        'F': '#32CD32', 'W': '#32CD32', 'Y': '#32CD32',
+        'K': '#0000FF', 'R': '#0000FF', 'H': '#0000FF', 
+        'D': '#FF0000', 'E': '#FF0000',
+        'G': '#888888', 'P': '#888888',
+        'S': '#FF8C00', 'T': '#FF8C00', 'N': '#FF8C00', 'Q': '#FF8C00', 'C': '#FF8C00'
+    };
+
+    // Global storage to hold the calculated data for export
+    let tsvCurrentData = null;
+    let fastaCurrentData = null;
+
+    // --- TSV LOGIC ---
+    document.getElementById('tsvInput').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const text = await file.text();
+        const lines = text.trim().split(/\r?\n/);
+        const firstLineCols = lines[0].split('\t');
+        const numSites = firstLineCols.length - 1;
+        const frequencies = Array.from({ length: numSites }, () => Array(20).fill(0));
+        let validRows = 0;
+
+        lines.forEach(line => {
+            const cols = line.split('\t');
+            if (cols.length <= 1) return;
+            validRows++;
+            for (let i = 1; i < cols.length; i++) {
+                const aaIndex = parseInt(cols[i]);
+                if (!isNaN(aaIndex) && aaIndex >= 0 && aaIndex < 20) frequencies[i-1][aaIndex]++;
+            }
+        });
+
+        tsvCurrentData = frequencies.map(counts => 
+            counts.map((count, idx) => ({ char: AMINO_ACIDS_LIST[idx], freq: count / validRows }))
+                  .filter(d => d.freq > 0).sort((a, b) => a.freq - b.freq)
+        );
+
+        renderLogo('tsvCanvas', tsvCurrentData);
+        document.getElementById('exportTsv').style.display = 'block';
+    });
+
+    // --- FASTA LOGIC ---
+    document.getElementById('fastaInput').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const text = await file.text();
+        const sequences = [];
+        let cur = "";
+        text.split('\n').forEach(l => {
+            if (l.trim().startsWith('>')) { if(cur) sequences.push(cur.toUpperCase()); cur=""; }
+            else cur += l.trim().replace(/[^a-zA-Z]/g, '');
+        });
+        if(cur) sequences.push(cur.toUpperCase());
+
+        const maxL = Math.max(...sequences.map(s => s.length));
+        fastaCurrentData = [];
+        for (let i = 0; i < maxL; i++) {
+            const counts = {}; let obs = 0;
+            sequences.forEach(s => { if(s[i]) { counts[s[i]] = (counts[s[i]]||0)+1; obs++; }});
+            fastaCurrentData.push(Object.keys(counts).map(aa => ({ char: aa, freq: counts[aa]/obs })).sort((a,b)=>a.freq-b.freq));
+        }
+
+        renderLogo('fastaCanvas', fastaCurrentData);
+        document.getElementById('exportFasta').style.display = 'block';
+    });
+
+    // --- RENDER CANVAS ---
+    function renderLogo(canvasId, logoData) {
+        const canvas = document.getElementById(canvasId);
+        const ctx = canvas.getContext('2d');
+        const siteW = 45, maxH = 250, pad = 50;
+
+        canvas.width = (logoData.length * siteW) + (pad * 2);
+        canvas.height = maxH + (pad * 2);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        ctx.strokeStyle = "#cbd5e0";
+        ctx.beginPath(); ctx.moveTo(pad, pad); ctx.lineTo(pad, maxH + pad); ctx.lineTo(canvas.width - pad, maxH + pad); ctx.stroke();
+
+        logoData.forEach((site, xIdx) => {
+            const x = pad + (xIdx * siteW);
+            let curY = maxH + pad;
+            site.forEach(item => {
+                const h = item.freq * maxH; if (h < 1) return;
+                ctx.save();
+                ctx.fillStyle = COLOR_MAP[item.char] || '#555';
+                ctx.font = `bold 100px Arial`;
+                ctx.textAlign = 'center';
+                ctx.translate(x + siteW/2, curY);
+                ctx.scale(siteW/65, h/75);
+                ctx.fillText(item.char, 0, 0);
+                ctx.restore();
+                curY -= h;
+            });
+            if ((xIdx + 1) % 5 === 0 || xIdx === 0) {
+                ctx.fillStyle = "#a0aec0"; ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+                ctx.fillText(xIdx + 1, x + siteW/2, maxH + pad + 18);
+            }
+        });
+    }
+
+    // --- SVG EXPORT LOGIC ---
+    function downloadSVG(logoData, filename) {
+        const siteW = 45, maxH = 250, pad = 50;
+        const width = (logoData.length * siteW) + (pad * 2);
+        const height = maxH + (pad * 2);
+
+        let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+        svg += `<rect width="100%" height="100%" fill="white"/>`;
+        
+        // Axes
+        svg += `<path d="M${pad} ${pad} V${maxH + pad} H${width - pad}" fill="none" stroke="#cbd5e0" stroke-width="1"/>`;
+
+        logoData.forEach((site, xIdx) => {
+            const x = pad + (xIdx * siteW);
+            let curY = maxH + pad;
+
+            site.forEach(item => {
+                const h = item.freq * maxH;
+                if (h < 1) return;
+
+                const color = COLOR_MAP[item.char] || '#555';
+                const scaleX = siteW / 65;
+                const scaleY = h / 75;
+
+                // SVG Text with transformations
+                // We use translate to position and scale to stretch vertically
+                svg += `<g transform="translate(${x + siteW/2}, ${curY}) scale(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)})">
+                            <text font-family="Arial" font-weight="bold" font-size="100" text-anchor="middle" fill="${color}">${item.char}</text>
+                        </g>`;
+                curY -= h;
+            });
+
+            // Labels
+            if ((xIdx + 1) % 5 === 0 || xIdx === 0) {
+                svg += `<text x="${x + siteW/2}" y="${maxH + pad + 18}" font-family="sans-serif" font-size="11" fill="#a0aec0" text-anchor="middle">${xIdx + 1}</text>`;
+            }
+        });
+
+        svg += `</svg>`;
+
+        const blob = new Blob([svg], {type: 'image/svg+xml'});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+    }
+
+    document.getElementById('exportTsv').addEventListener('click', () => downloadSVG(tsvCurrentData, 'tsv_logo.svg'));
+    document.getElementById('exportFasta').addEventListener('click', () => downloadSVG(fastaCurrentData, 'fasta_logo.svg'));
+</script>
+
+</body>
+</html>

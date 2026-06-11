@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CCD1 Graph Visualizer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f9f9f9; }
+        #controls { margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        #canvas-container { width: 100%; height: 800px; background: white; border: 1px solid #ccc; overflow: hidden; position: relative; }
+        .node circle { stroke: #333; stroke-width: 1.5px; }
+        .node text { font-size: 10px; pointer-events: none; }
+        .link { fill: none; stroke: #999; stroke-opacity: 0.6; }
+        .clade-node { fill: #69b3a2; }
+        .split-node { fill: #ff9900; }
+        .tooltip { position: absolute; padding: 8px; background: rgba(0,0,0,0.8); color: white; border-radius: 4px; pointer-events: none; font-size: 12px; display: none; z-index: 10; }
+        .legend { font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <h2>Conditional Clade Distribution (CCD1) Visualizer</h2>
+    <div id="controls">
+        <label>Upload Nexus Tree File: </label>
+        <input type="file" id="fileInput" accept=".nexus,.nex,.tree,.trees">
+        <p><small>Note: Assumes a standard Nexus format with a TAXA block and TREES block (binary trees).</small></p>
+    </div>
+
+    <div id="canvas-container">
+        <div id="tooltip" class="tooltip"></div>
+    </div>
+
+<script>
+    const width = document.getElementById('canvas-container').clientWidth;
+    const height = 800;
+    const tooltip = d3.select("#tooltip");
+    var cladeCounts = new Map(); // cladeString -> frequency
+    var splitCounts = new Map(); // parentClade|child1|child2 -> frequency
+
+    const svg = d3.select("#canvas-container")
+        .append("svg")
+        .attr("width", "100%")
+        .attr("height", height)
+        .call(d3.zoom().on("zoom", (event) => {
+            container.attr("transform", event.transform);
+        }));
+
+    const container = svg.append("g");
+
+    document.getElementById('fileInput').addEventListener('change', handleFile);
+
+    function handleFile(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => processNexus(e.target.result);
+        reader.readAsText(file);
+    }
+
+
+    function processNexus(content) {
+        // 1. Basic Nexus Parsing
+        const taxaMatch = content.match(/BEGIN TAXA;[\s\S]*?TAXLABELS\s+([\s\S]*?);/i);
+        if (!taxaMatch) { alert("Could not find TAXA block."); return; }
+        const taxa = taxaMatch[1].trim().split(/\s+/).map(t => t.replace(/['"]/g, ""));
+
+        const treeLines = content.match(/tree\s+.*?\s*=\s*(.*);/gi);
+        if (!treeLines) { alert("No trees found in file."); return; }
+
+        const newickStrings = treeLines.map(line => line.replace(/tree\s+.*?\s*=\s*/i, "").replace(/;$/, ""));
+        
+        // 2. Build CCD1
+        cladeCounts = new Map(); // cladeString -> frequency
+        splitCounts = new Map(); // parentClade|child1|child2 -> frequency
+        
+        newickStrings.forEach(nwk => {
+            const root = parseNewick(nwk, taxa);
+            traverseTree(root);
+            
+        });
+
+        function traverseTree(node) {
+            if (!node.children || node.children.length === 0) {
+                const clade = [node.name].sort().join(",");
+                cladeCounts.set(clade, (cladeCounts.get(clade) || 0) + 1);
+                return clade;
+            }
+            
+            const childClades = node.children.map(traverseTree).sort();
+            const parentClade = childClades.flatMap(c => c.split(",")).sort().join(",");
+            
+            cladeCounts.set(parentClade, (cladeCounts.get(parentClade) || 0) + 1);
+            
+            // For binary splits in CCD1
+            if (childClades.length === 2) {
+                const splitKey = `${parentClade}|${childClades[0]}|${childClades[1]}`;
+                splitCounts.set(splitKey, (splitCounts.get(splitKey) || 0) + 1);
+            }
+            return parentClade;
+        }
+
+        renderGraph(cladeCounts, splitCounts, taxa.length);
+    }
+
+    // Basic Newick Parser
+    function parseNewick(s, taxaLabels) {
+        let ancestors = [];
+        let tree = { children: [] };
+        let tokens = s.split(/\s*(;|\(|\)|,|:)\s*/);
+        for (let i = 0; i < tokens.length; i++) {
+            let token = tokens[i];
+            if (token === '(') {
+                let subtree = { children: [] };
+                tree.children.push(subtree);
+                ancestors.push(tree);
+                tree = subtree;
+            } else if (token === ',') {
+                let subtree = { children: [] };
+                ancestors[ancestors.length - 1].children.push(subtree);
+                tree = subtree;
+            } else if (token === ')') {
+                tree = ancestors.pop();
+            } else if (token === ':') {
+                i++; // ignore lengths for topology CCD
+            } else if (token && token !== ';' && token !== '') {
+                // Handle translation if token is index or name
+                let name = token.replace(/['"]/g, "");
+                if (!isNaN(name)) name = taxaLabels[parseInt(name) - 1] || name;
+                tree.name = name;
+            }
+        }
+        return tree;
+    }
+
+    function renderGraph(cladeCounts, splitCounts, numTaxa) {
+        container.selectAll("*").remove();
+        
+        const nodes = [];
+        const links = [];
+        const nodeMap = new Map();
+
+        // Add Clade Nodes
+        cladeCounts.forEach((count, clade) => {
+            const taxCount = clade.split(",").length;
+//            const node = { id: clade, label: taxCount === 2 ? clade : `Clade (${taxCount} taxa)`, type: 'clade', count, level: (numTaxa - taxCount) * 2 };
+            const node = { id: clade, label: clade, type: 'clade', count, level: (numTaxa - taxCount) * 2 };
+            nodes.push(node);
+            nodeMap.set(clade, node);
+        });
+
+        // Add Split Nodes and Links
+        splitCounts.forEach((count, key) => {
+            const [parent, c1, c2] = key.split("|");
+            const parentProb = count / cladeCounts.get(parent);
+            const splitId = `split_${key}`;
+            
+            const splitNode = { id: splitId, label: `${c1} || ${c2} (${parentProb.toFixed(2)})`, type: 'split', prob: parentProb, level: nodeMap.get(parent).level + 1 };
+            nodes.push(splitNode);
+
+            // Link Parent Clade -> Split
+            links.push({ source: parent, target: splitId, weight: parentProb * 5 });
+            // Link Split -> Child Clades
+            links.push({ source: splitId, target: c1, weight: 1.5 });
+            links.push({ source: splitId, target: c2, weight: 1.5 });
+        });
+
+        // Hierarchical Force Layout
+        const simulation = d3.forceSimulation(nodes)
+            .force("link", d3.forceLink(links).id(d => d.id).distance(150))
+            .force("charge", d3.forceManyBody().strength(-200))
+            .force("x", d3.forceX(width / 3))
+            .force("y", d3.forceY(d => d.level * 60 + 50).strength(0.75))
+            .on("tick", ticked);
+
+        const link = container.append("g")
+            .selectAll("line")
+            .data(links)
+            .enter().append("line")
+            .attr("class", "link")
+            .attr("stroke-width", d => d.weight);
+
+        const node = container.append("g")
+            .selectAll("g")
+            .data(nodes)
+            .enter().append("g")
+            .attr("class", "node")
+            .call(d3.drag()
+                .on("start", dragstarted)
+                .on("drag", dragged)
+                .on("end", dragended))
+            .on("mouseover", (event, d) => {
+                tooltip.style("display", "block").html(
+                    d.type === 'clade' ? `<strong>Taxa:</strong> ${d.id}<br><strong>Freq:</strong> ${d.count}` : `<strong>Conditional Prob:</strong> ${d.prob.toFixed(4)}`
+                );
+            })
+            .on("mousemove", (event) => {
+                tooltip.style("left", (event.pageX + 10) + "px").style("top", (event.pageY - 10) + "px");
+            })
+            .on("mouseout", () => tooltip.style("display", "none"));
+
+        node.append("rect")
+            .filter(d => d.type === 'split')
+            .attr("width", 50).attr("height", 10).attr("x", -25).attr("y", -5)
+            .attr("class", "split-node");
+
+        node.append("circle")
+            .filter(d => d.type === 'clade')
+            .attr("r", d => 10 + Math.sqrt(d.count))
+            .attr("width", 50).attr("height", 10)
+            .attr("class", "clade-node");
+
+        node.append("text")
+            .attr("dy", 15)
+            .attr("text-anchor", "middle")
+            .text(d => d.label);
+
+        function ticked() {
+            link
+                .attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y);
+            node.attr("transform", d => `translate(${d.x},${d.y})`);
+        }
+
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x; d.fy = d.y;
+        }
+        function dragged(event, d) { d.fx = event.x; d.fy = event.y; }
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null; d.fy = null;
+        }
+    }
+</script>
+</body>
+</html>
