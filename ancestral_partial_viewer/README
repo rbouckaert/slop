@@ -1,0 +1,5 @@
+How to use this:
+* Install dependencies: pip3 install flask biopython
+* Save the files: Create a folder, put app.py in the root and index.html inside a folder named templates.
+* Run the Server: Run python app.py.
+* Open Browser: Go to http://127.0.0.1:5000.
