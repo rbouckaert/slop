@@ -21,6 +21,9 @@ def calculate_likelihoods(node, tip_states, states_map):
         state = tip_states.get(node.name)
         if state in states_map:
             partials[states_map[state]] = 1.0
+        else:
+            for i in range(0,4):
+                partials[i] = 1.0
         node.partials = partials
         return partials
 
@@ -47,7 +50,7 @@ def calculate_likelihoods(node, tip_states, states_map):
     node.partials = [p/s for p in node_partials] if s > 0 else node_partials
     return node_partials
 
-def tree_to_dict(node, dist=0):
+def tree_to_dict(node, tip_data, dist=0):
     """Recursively build dict, tracking cumulative distance from root."""
     branch_len = node.branch_length if node.branch_length is not None else 0
     cumulative_dist = dist + branch_len
@@ -56,8 +59,8 @@ def tree_to_dict(node, dist=0):
         "name": node.name if node.name else "",
         "dist": cumulative_dist,
         "branch_length": branch_len,
-        "partials": getattr(node, 'partials', []),
-        "children": [tree_to_dict(c, cumulative_dist) for c in node.clades]
+        "partials": tip_data.get(node.name) if node.is_terminal() else getattr(node, 'partials', []),
+        "children": [tree_to_dict(c, tip_data, cumulative_dist) for c in node.clades]
     }
 
 @app.route('/')
@@ -75,7 +78,9 @@ def process():
     calculate_likelihoods(tree.root, tip_data, states_map)
     
     # Pass 0 as the starting distance for the root
-    return jsonify(tree_to_dict(tree.root, 0))
+    tree2 = tree_to_dict(tree.root, tip_data, 0)
+    print(tree2)
+    return jsonify(tree_to_dict(tree.root, tip_data, 0))
 
 if __name__ == '__main__':
     app.run(debug=True)

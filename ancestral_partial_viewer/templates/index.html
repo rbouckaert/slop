@@ -65,7 +65,7 @@
             const data = await response.json();
             drawTree(data);
         } catch (err) {
-            alert("Check Newick format or Tip Names.");
+            alert("Check Newick format or Tip Names.>" + err + "<");
         }
     }
 
@@ -127,6 +127,8 @@
             .html(d => {
                 if (!d.data.partials || d.data.partials.length === 0) return "";
                 const p = d.data.partials;
+                if (p.length == 1)
+                    return p;
                 return `[A:${p[0].toFixed(2)} C:${p[1].toFixed(2)} G:${p[2].toFixed(2)} T:${p[3].toFixed(2)}]`;
             });
     }
