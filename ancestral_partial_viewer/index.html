@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phylogenetic Tree Explorer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 20px; background-color: #f0f2f5; color: #1c1e21; }
+        .container { max-width: 1100px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.1); }
+        h1 { margin-top: 0; font-size: 24px; color: #333; }
+        textarea { width: 100%; height: 80px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-family: 'Courier New', monospace; margin-bottom: 15px; font-size: 14px; box-sizing: border-box; }
+        
+        .button-group { margin-bottom: 20px; display: flex; gap: 10px; }
+        button { border: none; padding: 12px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; transition: opacity 0.2s; }
+        .btn-render { background-color: #007bff; color: white; }
+        .btn-export { background-color: #6c757d; color: white; }
+        button:hover { opacity: 0.85; }
+
+        #tree-container { margin-top: 20px; overflow: auto; background: #fff; border: 1px solid #eee; border-radius: 8px; }
+        
+        /* SVG Styles - These are mirrored in the export function */
+        .link { fill: none; stroke: #999; stroke-width: 1.5px; }
+        .node circle { fill: #fff; stroke: #333; stroke-width: 1.5px; }
+        .tip-label { font-weight: 600; font-size: 13px; fill: #222; }
+        .partial-label { font-size: 12px; fill: #d81b60; font-family: 'Courier New', monospace; font-weight: bold; }
+        .axis line, .axis path { stroke: #ccc; }
+        .axis text { font-size: 11px; fill: #888; }
+
+        .info-box { font-size: 13px; color: #555; margin-bottom: 15px; padding: 12px; background: #e7f3ff; border-radius: 6px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Phylogenetic Time Tree & Likelihoods</h1>
+    <div class="info-box">
+        <strong>Format:</strong> <code>Name[Nucleotide]:BranchLength</code>. Nucleotides: A, C, G, T. <br>
+        <strong>Logic:</strong> Felsenstein's Pruning with JC69 model. Internal nodes show normalized partial likelihoods.
+    </div>
+    
+    <textarea id="newickInput">((A[A]:0.1,B[C]:0.1):0.2,(C[G]:0.1,D[T]:0.1):0.2);</textarea>
+    
+    <div class="button-group">
+        <button class="btn-render" onclick="runInference()">Render Tree</button>
+        <button class="btn-export" onclick="exportSVG()">Export as SVG</button>
+    </div>
+
+    <div id="tree-container">
+        <!-- SVG will be rendered here -->
+    </div>
+</div>
+
+<script>
+    const NUC_MAP = { 'A': 0, 'C': 1, 'G': 2, 'T': 3 };
+
+    function parseNewick(s) {
+        let ancestors = [];
+        let tree = {};
+        let tokens = s.split(/\s*(;|\(|\)|,|:|\[|\])\s*/);
+        let state = null;
+        for (let token of tokens) {
+            if (!token || token.trim() === "") continue;
+            switch (token) {
+                case '(':
+                    let subtree = { children: [] };
+                    if (!tree.children) tree.children = [];
+                    tree.children.push(subtree);
+                    ancestors.push(tree);
+                    tree = subtree;
+                    break;
+                case ',':
+                    let sibling = {};
+                    ancestors[ancestors.length - 1].children.push(sibling);
+                    tree = sibling;
+                    break;
+                case ')': tree = ancestors.pop(); break;
+                case ':': state = 'len'; break;
+                case '[': state = 'nuc'; break;
+                case ']': state = null; break;
+                default:
+                    if (state === 'len') { tree.branch_length = parseFloat(token); state = null; }
+                    else if (state === 'nuc') { tree.nucleotide = token.toUpperCase(); }
+                    else { tree.name = token; }
+            }
+        }
+        return tree;
+    }
+
+    function getJCMatrix(t) {
+        const p_same = 0.25 + 0.75 * Math.exp(-(4/3) * t);
+        const p_diff = 0.25 - 0.25 * Math.exp(-(4/3) * t);
+        let matrix = Array.from({length: 4}, (_, i) => 
+            Array.from({length: 4}, (_, j) => (i === j ? p_same : p_diff))
+        );
+        return matrix;
+    }
+
+    function multiplyMV(matrix, vector) {
+        let result = [0, 0, 0, 0];
+        for (let i = 0; i < 4; i++) {
+            for (let j = 0; j < 4; j++) {
+                result[i] += matrix[i][j] * vector[j];
+            }
+        }
+        return result;
+    }
+
+    function computePartials(node) {
+        if (!node.children || node.children.length === 0) {
+            let partial = [0, 0, 0, 0];
+            const idx = NUC_MAP[node.data.nucleotide];
+            if (idx !== undefined) partial[idx] = 1.0;
+            node.partials = partial;
+            return partial;
+        }
+
+        let combined = [1, 1, 1, 1];
+        node.children.forEach(child => {
+            const childPartials = computePartials(child);
+            const matrix = getJCMatrix(child.data.branch_length || 0);
+            const probFromChild = multiplyMV(matrix, childPartials);
+            for (let i = 0; i < 4; i++) combined[i] *= probFromChild[i];
+        });
+
+        const sum = combined.reduce((a, b) => a + b, 0);
+        node.partials = sum > 0 ? combined.map(p => p / sum) : combined;
+        return node.partials;
+    }
+
+    function runInference() {
+        const input = document.getElementById('newickInput').value.trim();
+        const container = d3.select("#tree-container");
+        container.selectAll("*").remove();
+        const svg = container.append("svg").attr("id", "tree-svg");
+
+        try {
+            const data = parseNewick(input);
+            const root = d3.hierarchy(data);
+
+            let maxTime = 0;
+            root.eachBefore(d => {
+                d.time = (d.parent ? d.parent.time : 0) + (d.data.branch_length || 0);
+                if (d.time > maxTime) maxTime = d.time;
+            });
+
+            computePartials(root);
+
+            const width = 700, margin = {top: 40, right: 180, bottom: 60, left: 50};
+            const height = Math.max(250, root.leaves().length * 60);
+            
+            const g = svg.attr("width", width + margin.left + margin.right)
+                         .attr("height", height + margin.top + margin.bottom)
+                         .append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const xScale = d3.scaleLinear().domain([0, maxTime]).range([0, width]);
+            const treeLayout = d3.cluster().size([height, width]);
+            treeLayout(root);
+            root.each(d => { d.y = xScale(d.time); });
+
+            g.selectAll(".link").data(root.links()).enter().append("path")
+                .attr("class", "link")
+                .attr("d", d => `M${d.source.y},${d.source.x}V${d.target.x}H${d.target.y}`);
+
+            const node = g.selectAll(".node").data(root.descendants()).enter().append("g")
+                .attr("class", "node")
+                .attr("transform", d => `translate(${d.y},${d.x})`);
+
+            node.append("circle").attr("r", 4);
+
+            node.filter(d => d.children)
+                .append("text").attr("class", "partial-label")
+                .attr("dx", +50)
+                .attr("dy", -8).attr("text-anchor", "middle")
+                .text(d => `[${d.partials.map(p => p.toFixed(3)).join(', ')}]`);
+
+            node.filter(d => !d.children).append("text")
+                .attr("class", "tip-label")
+                .attr("dx", 10).attr("dy", 5)
+                .text(d => `${d.data.name || ''} [${d.data.nucleotide || ''}]`);
+
+            g.append("g").attr("class", "axis").attr("transform", `translate(0,${height + 20})`)
+                .call(d3.axisBottom(xScale))
+                .append("text").attr("x", width/2).attr("y", 35).attr("fill", "#000").text("Distance (Substitutions per site)");
+
+        } catch (e) {
+            console.error(e);
+            alert("Error processing tree.");
+        }
+    }
+
+    function exportSVG() {
+        const svgEl = document.getElementById("tree-svg");
+        if (!svgEl) return;
+
+        // Clone the SVG so we don't mess up the displayed version
+        const svgClone = svgEl.cloneNode(true);
+        
+        // Define styles to embed within the SVG so it looks right when opened elsewhere
+        const style = document.createElement("style");
+        style.textContent = `
+            .link { fill: none; stroke: #999; stroke-width: 1.5px; }
+            .node circle { fill: #fff; stroke: #333; stroke-width: 1.5px; }
+            .tip-label { font-weight: bold; font-size: 13px; font-family: sans-serif; }
+            .partial-label { font-size: 10px; fill: #d81b60; font-family: monospace; font-weight: bold; }
+            .axis line, .axis path { stroke: #ccc; }
+            .axis text { font-size: 11px; fill: #888; font-family: sans-serif; }
+        `;
+        svgClone.prepend(style);
+
+        // Serialize to XML
+        const serializer = new XMLSerializer();
+        let source = serializer.serializeToString(svgClone);
+
+        // Add namespaces if missing
+        if(!source.match(/^<svg[^>]+xmlns="http\:\/\/www\.w3\.org\/2000\/svg"/)){
+            source = source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
+        }
+        if(!source.match(/^<svg[^>]+xmlns\:xlink="http\:\/\/www\.w3\.org\/1999\/xlink"/)){
+            source = source.replace(/^<svg/, '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
+        }
+
+        // Create a download link
+        const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(source);
+        const downloadLink = document.createElement("a");
+        downloadLink.href = url;
+        downloadLink.download = "phylogeny_export.svg";
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        document.body.removeChild(downloadLink);
+    }
+
+    // Run once on load
+    runInference();
+</script>
+
+</body>
+</html>
