@@ -211,8 +211,8 @@
         let Fe_vec = edges.map(pair => F_matrix[pair[0]][pair[1]]);
         let Frev_vec = edges.map(pair => F_matrix[pair[1]][pair[0]]);
         
-        let Se = Fe_vec.map((f, i) => f + Frev_vec[i]);
-        let Je = Fe_vec.map((f, i) => f - Frev_vec[i]);
+        let Se = Fe_vec.map((f, i) => (f + Frev_vec[i])/2);
+        let Je = Fe_vec.map((f, i) => (f - Frev_vec[i])/2);
         let De = Je.map((j, i) => Se[i] === 0 ? 0 : j / Se[i]);
         
         // Calculate r_e = S_e / (pi_i * pi_j)
